@@ -1,6 +1,10 @@
 [build]
-  publish = "."
+  publish = "public"
   command = ""
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
 
 # Always fetch the latest service worker and manifest so updates reach installed apps.
 [[headers]]

@@ -1,5 +1,5 @@
 /* 30 HARD service worker: offline app shell, cache-first with background refresh. */
-const CACHE = '30hard-v1';
+const CACHE = '30hard-v2';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'data.js', 'icons.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -14,6 +14,7 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).pathname.startsWith('/api/')) return;
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then(hit => {
     const net = fetch(e.request).then(res => {
       if (res && (res.ok || res.type === 'opaque')) {

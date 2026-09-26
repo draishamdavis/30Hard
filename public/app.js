@@ -16,17 +16,60 @@
   function fromISO(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
 
   function defaultState() {
-    return { start: todayISO(), theme: 'system', reqs: {}, days: {}, why: { why: '', word: '', becoming: '', verse: '' } };
+    return { start: todayISO(), onboarded: false, theme: 'system', reqs: {}, off: {}, days: {}, why: { why: '', word: '', becoming: '', verse: '' } };
   }
-  function load() {
+  let user = null;
+  let state = defaultState();
+
+  /* Account sync: the server holds the source of truth, and localStorage keeps an offline copy. */
+  function cacheKey() { return `${STORE_KEY}.${user ? user.id : 'anon'}`; }
+  function readCache() {
+    try { return JSON.parse(localStorage.getItem(`${STORE_KEY}.session`) || 'null'); } catch (e) { return null; }
+  }
+  function writeCache() {
     try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (raw) return Object.assign(defaultState(), JSON.parse(raw));
-    } catch (e) { /* storage unavailable: fall back to in-memory state */ }
-    return defaultState();
+      localStorage.setItem(cacheKey(), JSON.stringify(state));
+      localStorage.setItem(`${STORE_KEY}.session`, JSON.stringify({ user, dirty }));
+    } catch (e) { /* ignore */ }
   }
-  let state = load();
-  function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ } }
+  function cachedState(u) {
+    try { return JSON.parse(localStorage.getItem(`${STORE_KEY}.${u.id}`) || 'null'); } catch (e) { return null; }
+  }
+  function clearCache() {
+    try {
+      Object.keys(localStorage).filter(k => k.startsWith(STORE_KEY)).forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* ignore */ }
+  }
+
+  let dirty = false, syncTimer = null;
+  function save() {
+    dirty = true;
+    writeCache();
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(sync, 700);
+  }
+  async function sync(keepalive) {
+    if (!user || !dirty) return;
+    clearTimeout(syncTimer);
+    try {
+      const res = await fetch('/api/state', {
+        method: 'PUT', credentials: 'same-origin', keepalive: !!keepalive,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state)
+      });
+      if (res.status === 401) { signedOut('Your session ended. Please sign in again.'); return; }
+      if (res.ok) { dirty = false; writeCache(); }
+    } catch (e) { /* offline: stays dirty and retries later */ }
+  }
+  async function api(path, method = 'GET', data) {
+    const res = await fetch(`/api/${path}`, {
+      method, credentials: 'same-origin',
+      headers: data ? { 'Content-Type': 'application/json' } : {},
+      body: data ? JSON.stringify(data) : undefined
+    });
+    let payload = {};
+    try { payload = await res.json(); } catch (e) { /* empty body */ }
+    return { ok: res.ok, status: res.status, data: payload };
+  }
 
   function dayRecord(n) {
     if (!state.days[n]) state.days[n] = { done: {}, water: 0, devo: false, journal: '' };
@@ -42,11 +85,13 @@
   function currentDay() { return Math.min(TOTAL_DAYS, Math.max(1, daysSinceStart() + 1)); }
   function dateForDay(n) { const d = fromISO(state.start); d.setDate(d.getDate() + n - 1); return d; }
 
-  const commitments = () => window.COMMITMENTS.map(c => Object.assign({}, c, { req: state.reqs[c.id] || c.req }));
+  const commitments = () => window.COMMITMENTS
+    .filter(c => !(state.off || {})[c.id])
+    .map(c => Object.assign({}, c, { req: state.reqs[c.id] || c.req }));
   function isDone(rec, c) { return c.count ? (rec.water || 0) >= c.count : !!rec.done[c.id]; }
   function dayPct(n) {
     const rec = peekDay(n), list = commitments();
-    return list.filter(c => isDone(rec, c)).length / list.length;
+    return list.length ? list.filter(c => isDone(rec, c)).length / list.length : 0;
   }
   function dayStatus(n) {
     const cur = currentDay(), pct = dayPct(n);
@@ -66,6 +111,11 @@
   }
   function hydrateIcons(root = document) {
     root.querySelectorAll('i[data-icon]').forEach(el => { el.outerHTML = icon(el.dataset.icon); });
+  }
+  function greeting() {
+    const h = new Date().getHours();
+    const part = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+    return user ? `${part}, ${user.name.split(' ')[0]}` : 'Today';
   }
   function fmtDate(d) { return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }); }
   function haptic() { if (navigator.vibrate) navigator.vibrate(8); }
@@ -92,6 +142,7 @@
   let devoDay = null;   // Devotional screen can show a past day
 
   function route(keepScroll) {
+    if (!user || document.body.dataset.screen !== 'app') return;
     const name = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'today';
     document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`));
     document.querySelectorAll('.tab').forEach(t => {
@@ -127,7 +178,7 @@
 
     $('#view-today').innerHTML = `
       <div class="day-head">
-        <div class="eyebrow">${n === cur ? 'Today' : 'Looking back'}</div>
+        <div class="eyebrow">${n === cur ? esc(greeting()) : 'Looking back'}</div>
         <div class="day-count">DAY ${pad(n)} <small>/ ${TOTAL_DAYS}</small></div>
         <div class="day-date">${esc(fmtDate(dateForDay(n)))}</div>
         ${banner}
@@ -398,8 +449,40 @@
 
   /* ─────────────── Settings sheet ─────────────── */
 
+  function switchHTML(id, on, label) {
+    return `<button class="switch" role="switch" data-toggle="${id}" aria-checked="${on}" aria-label="${esc(label)}"><span></span></button>`;
+  }
+  function commitmentEditor(src) {
+    return window.COMMITMENTS.map(c => {
+      const on = !src.off[c.id];
+      return `
+        <div class="edit-row ${on ? '' : 'is-off'}" data-row="${c.id}">${icon(c.icon)}
+          <div><div class="edit-name">${esc(c.name)}</div>
+          <input type="text" data-req="${c.id}" value="${esc(src.reqs[c.id] || c.req)}" aria-label="${esc(c.name)} target" ${on ? '' : 'disabled'}/></div>
+          ${switchHTML(c.id, on, `Include ${c.name}`)}
+        </div>`;
+    }).join('');
+  }
+  function bindCommitmentEditor(root, src, onChange) {
+    root.querySelectorAll('[data-req]').forEach(inp => inp.addEventListener('input', () => {
+      const v = inp.value.trim();
+      if (v) src.reqs[inp.dataset.req] = v; else delete src.reqs[inp.dataset.req];
+      onChange();
+    }));
+    root.querySelectorAll('[data-toggle]').forEach(sw => sw.addEventListener('click', () => {
+      const id = sw.dataset.toggle, turningOff = !src.off[id];
+      const activeCount = window.COMMITMENTS.filter(c => !src.off[c.id]).length;
+      if (turningOff && activeCount <= 1) { toast('Keep at least one commitment'); return; }
+      if (turningOff) src.off[id] = true; else delete src.off[id];
+      sw.setAttribute('aria-checked', !turningOff);
+      const row = root.querySelector(`[data-row="${id}"]`);
+      row.classList.toggle('is-off', turningOff);
+      row.querySelector('input').disabled = turningOff;
+      onChange();
+    }));
+  }
+
   function renderSettings() {
-    const list = window.COMMITMENTS;
     $('#settingsSheet').innerHTML = `
       <div class="grabber"></div>
       <div class="sheet-head">
@@ -408,7 +491,13 @@
       </div>
 
       <div class="field">
-        <label for="startDate">Day 01 began on</label>
+        <label for="profileName">Your name</label>
+        <input type="text" id="profileName" value="${esc(user.name)}" maxlength="60" autocomplete="name"/>
+        <div class="field-note">${esc(user.email)}</div>
+      </div>
+
+      <div class="field">
+        <label for="startDate">Day 01 ${daysSinceStart() < 0 ? 'begins' : 'began'} on</label>
         <input type="date" id="startDate" value="${state.start}"/>
       </div>
 
@@ -419,31 +508,196 @@
         </div>
       </div>
 
-      <div class="field">
+      <div class="field" id="settingsCommitments">
         <span class="label">Your commitments</span>
-        ${list.map(c => `
-          <div class="edit-row">${icon(c.icon)}
-            <div><div class="edit-name">${esc(c.name)}</div>
-            <input type="text" data-req="${c.id}" value="${esc(state.reqs[c.id] || c.req)}" aria-label="${esc(c.name)} requirement"/></div>
-          </div>`).join('')}
+        ${commitmentEditor(state)}
       </div>
 
+      <button class="btn ghost" data-act="sign-out">${icon('logOut')} Sign out</button>
       <button class="btn danger" data-act="reset">${icon('rotateCcw')} Reset all progress</button>
-      <p class="fine">Your progress stays private on this device.<br/>Add 30 HARD to your Home Screen for the full app experience.</p>
+      <p class="fine">Your progress syncs to your account, so you can sign in on any device.<br/>Add 30 HARD to your Home Screen for the full app experience.</p>
     `;
 
     $('#startDate').addEventListener('change', e => {
       if (!e.target.value) return;
-      state.start = e.target.value; viewDay = null; devoDay = null; save(); route(); toast('Start date updated');
+      state.start = e.target.value; viewDay = null; devoDay = null; save(); route(true); toast('Start date updated');
     });
-    document.querySelectorAll('[data-req]').forEach(inp => inp.addEventListener('input', () => {
-      const v = inp.value.trim();
-      if (v) state.reqs[inp.dataset.req] = v; else delete state.reqs[inp.dataset.req];
-      save();
-    }));
+    let nameTimer;
+    $('#profileName').addEventListener('input', e => {
+      clearTimeout(nameTimer);
+      const name = e.target.value.trim();
+      if (!name) return;
+      nameTimer = setTimeout(async () => {
+        const r = await api('me', 'PATCH', { name }).catch(() => null);
+        if (r && r.ok) { user = r.data.user; writeCache(); }
+      }, 600);
+    });
+    bindCommitmentEditor($('#settingsCommitments'), state, save);
   }
   function openSettings() { renderSettings(); $('#app').classList.add('sheet-open'); }
   function closeSettings() { $('#app').classList.remove('sheet-open'); route(true); }
+
+  /* ─────────────── Account: sign in and sign up ─────────────── */
+
+  function showScreen(name) { document.body.dataset.screen = name; window.scrollTo(0, 0); }
+
+  function renderAuth(mode = 'signup', message = '') {
+    const signup = mode === 'signup';
+    $('#gate').innerHTML = `
+      <div class="gate-inner auth">
+        <div class="auth-mark">30<span>HARD</span></div>
+        <p class="auth-lede">Thirty days of discipline, wellness, and time with God.</p>
+
+        <div class="seg auth-seg" role="tablist">
+          <button role="tab" data-mode="signup" aria-pressed="${signup}">Create account</button>
+          <button role="tab" data-mode="login" aria-pressed="${!signup}">Sign in</button>
+        </div>
+
+        <form class="auth-form" id="authForm" novalidate>
+          ${signup ? `<label class="in"><span>Your name</span><input name="name" type="text" autocomplete="given-name" maxlength="60" required/></label>` : ''}
+          <label class="in"><span>Email</span><input name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" required/></label>
+          <label class="in"><span>Password</span><input name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" minlength="8" required/></label>
+          ${signup ? '<p class="hint">At least 8 characters.</p>' : ''}
+          <p class="form-error" id="authError" role="alert">${esc(message)}</p>
+          <button class="btn" type="submit">${signup ? 'Create my account' : 'Sign in'} ${icon('arrowRight')}</button>
+        </form>
+      </div>`;
+    $('#gate').querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => renderAuth(b.dataset.mode)));
+    $('#authForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const form = e.target, btn = form.querySelector('button[type="submit"]');
+      const data = Object.fromEntries(new FormData(form));
+      btn.disabled = true;
+      let r;
+      try { r = await api(signup ? 'signup' : 'login', 'POST', data); }
+      catch (err) { r = { ok: false, data: { error: 'You appear to be offline. Please try again.' } }; }
+      btn.disabled = false;
+      if (!r.ok) { $('#authError').textContent = r.data.error || 'Something went wrong. Please try again.'; return; }
+      enter(r.data.user, r.data.state);
+    });
+    showScreen('auth');
+    const first = $('#gate input');
+    if (first && window.matchMedia('(hover: hover)').matches) first.focus();
+  }
+
+  function signedOut(message) {
+    user = null; state = defaultState(); dirty = false;
+    clearCache();
+    $('#app').classList.remove('sheet-open');
+    renderAuth('login', message || '');
+  }
+
+  function enter(u, serverState) {
+    user = u;
+    const local = cachedState(u);
+    const session = readCache();
+    // Prefer unsynced local edits made offline; otherwise trust the server.
+    const useLocal = local && session && session.user && session.user.id === u.id && session.dirty;
+    state = Object.assign(defaultState(), useLocal ? local : (serverState || {}));
+    state.why = Object.assign(defaultState().why, state.why);
+    dirty = !!useLocal;
+    writeCache();
+    if (dirty) sync();
+    applyTheme();
+    if (!state.onboarded) { renderOnboarding(); return; }
+    startApp();
+  }
+
+  /* ─────────────── Onboarding: start date, commitments, why ─────────────── */
+
+  let ob = null;
+  function startOptions() {
+    const t = new Date(), add = n => { const d = new Date(t); d.setDate(d.getDate() + n); return d; };
+    const toMonday = ((8 - t.getDay()) % 7) || 7;
+    return [
+      { id: 'today', label: 'Today', date: toISO(t) },
+      { id: 'tomorrow', label: 'Tomorrow', date: toISO(add(1)) },
+      { id: 'monday', label: 'Next Monday', date: toISO(add(toMonday)) }
+    ];
+  }
+  const shortDate = iso => fromISO(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+
+  function renderOnboarding() {
+    if (!ob) ob = { step: 0, start: toISO(new Date()), custom: false, off: Object.assign({}, state.off), reqs: Object.assign({}, state.reqs), why: state.why.why, word: state.why.word };
+    const first = esc(user.name.split(' ')[0]);
+    const steps = [
+      () => {
+        const opts = startOptions();
+        const picked = ob.custom ? 'custom' : (opts.find(o => o.date === ob.start) || {}).id || 'custom';
+        return `
+          <div class="eyebrow">Step 1 of 3</div>
+          <h1 class="ob-title">Welcome, ${first}.<br/>When does Day 01 begin?</h1>
+          <p class="ob-lede">Choose the day your thirty days start. You can change it later in Settings.</p>
+          <div class="choice-list">
+            ${opts.map(o => `
+              <button class="choice" data-start="${o.date}" aria-pressed="${picked === o.id}">
+                <span class="choice-label">${o.label}</span><span class="choice-meta">${shortDate(o.date)}</span>
+              </button>`).join('')}
+            <button class="choice" data-start="custom" aria-pressed="${picked === 'custom'}">
+              <span class="choice-label">Choose a date</span><span class="choice-meta">${picked === 'custom' ? shortDate(ob.start) : ''}</span>
+            </button>
+            <input type="date" class="date-in ${picked === 'custom' ? 'show' : ''}" id="obDate" value="${ob.start}" aria-label="Start date"/>
+          </div>
+          <div class="ob-summary">${icon('calendar')} Day 30 lands on <strong>${esc(fmtDate((() => { const d = fromISO(ob.start); d.setDate(d.getDate() + 29); return d; })()))}</strong></div>`;
+      },
+      () => `
+          <div class="eyebrow">Step 2 of 3</div>
+          <h1 class="ob-title">Choose your daily commitments.</h1>
+          <p class="ob-lede">Turn off what does not fit this season and set targets that stretch you without breaking you.</p>
+          <div id="obCommitments">${commitmentEditor(ob)}</div>`,
+      () => `
+          <div class="eyebrow">Step 3 of 3</div>
+          <h1 class="ob-title">Why are you doing this?</h1>
+          <p class="ob-lede">On the hard days, this is what you will come back to.</p>
+          <label class="in"><span>Why I started</span><textarea id="obWhy" rows="3" placeholder="I am doing this because…">${esc(ob.why)}</textarea></label>
+          <label class="in"><span>My word for these 30 days</span><input id="obWord" type="text" maxlength="24" placeholder="One word" value="${esc(ob.word)}"/></label>`
+    ];
+
+    $('#gate').innerHTML = `
+      <div class="gate-inner onboard">
+        <div class="ob-top">
+          <button class="icon-btn" id="obBack" aria-label="Back" ${ob.step === 0 ? 'style="visibility:hidden"' : ''}>${icon('arrowLeft')}</button>
+          <div class="ob-dots">${[0, 1, 2].map(i => `<i class="${i <= ob.step ? 'on' : ''}"></i>`).join('')}</div>
+          <span style="width:40px"></span>
+        </div>
+        <div class="ob-body">${steps[ob.step]()}</div>
+        <div class="ob-foot">
+          <button class="btn" id="obNext">${ob.step === 2 ? `Begin my 30 days ${icon('arrowRight')}` : `Continue ${icon('arrowRight')}`}</button>
+        </div>
+      </div>`;
+
+    if (ob.step === 0) {
+      $('#gate').querySelectorAll('[data-start]').forEach(b => b.addEventListener('click', () => {
+        if (b.dataset.start === 'custom') { ob.custom = true; renderOnboarding(); const d = $('#obDate'); d.focus(); if (d.showPicker) try { d.showPicker(); } catch (e) { /* ignore */ } return; }
+        ob.custom = false; ob.start = b.dataset.start; renderOnboarding();
+      }));
+      $('#obDate').addEventListener('change', e => { if (e.target.value) { ob.start = e.target.value; ob.custom = true; renderOnboarding(); } });
+    }
+    if (ob.step === 1) bindCommitmentEditor($('#obCommitments'), ob, () => {});
+    if (ob.step === 2) {
+      $('#obWhy').addEventListener('input', e => { ob.why = e.target.value; });
+      $('#obWord').addEventListener('input', e => { ob.word = e.target.value; });
+    }
+    $('#obBack').addEventListener('click', () => { ob.step = Math.max(0, ob.step - 1); renderOnboarding(); });
+    $('#obNext').addEventListener('click', () => {
+      if (ob.step < 2) { ob.step++; renderOnboarding(); window.scrollTo(0, 0); return; }
+      Object.assign(state, { start: ob.start, off: ob.off, reqs: ob.reqs, onboarded: true });
+      state.why.why = ob.why.trim();
+      state.why.word = ob.word.trim();
+      ob = null;
+      save(); sync();
+      startApp();
+      toast(daysSinceStart() < 0 ? `Day 01 begins ${shortDate(state.start)}` : 'Day 01 begins today');
+    });
+    showScreen('onboard');
+  }
+
+  function startApp() {
+    viewDay = null; devoDay = null;
+    showScreen('app');
+    if (!location.hash) history.replaceState(null, '', '#today');
+    route();
+  }
 
   /* ─────────────── Events ─────────────── */
 
@@ -475,10 +729,21 @@
         act.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b === act));
         return;
       }
+      if (a === 'sign-out') {
+        (async () => {
+          await sync();
+          await api('logout', 'POST', {}).catch(() => null);
+          signedOut();
+        })();
+        return;
+      }
       if (a === 'reset') {
-        if (confirm('Reset all progress, journal entries, and your start date? Your My Why answers stay.')) {
-          state = Object.assign(defaultState(), { why: state.why, theme: state.theme, reqs: state.reqs });
-          viewDay = null; devoDay = null; save(); closeSettings(); toast('Progress reset. Day 01 starts today.');
+        if (confirm('Reset all progress and journal entries? Your commitments and My Why answers stay, and you will choose a new start date.')) {
+          state = Object.assign(defaultState(), { why: state.why, theme: state.theme, reqs: state.reqs, off: state.off, onboarded: true });
+          viewDay = null; devoDay = null; save();
+          $('#app').classList.remove('sheet-open');
+          ob = { step: 0, start: toISO(new Date()), custom: false, off: state.off, reqs: state.reqs, why: state.why.why, word: state.why.word };
+          renderOnboarding();
         }
         return;
       }
@@ -500,14 +765,37 @@
   // Roll over to the new day when the app returns from the background.
   let lastSeen = todayISO();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && todayISO() !== lastSeen) { lastSeen = todayISO(); viewDay = null; devoDay = null; route(); }
+    if (document.visibilityState === 'hidden') { sync(true); return; }
+    if (!user || document.body.dataset.screen !== 'app') return;
+    if (todayISO() !== lastSeen) { lastSeen = todayISO(); viewDay = null; devoDay = null; route(); }
   });
+  window.addEventListener('online', () => sync());
 
   /* ─────────────── Boot ─────────────── */
 
-  applyTheme();
-  hydrateIcons();
-  route();
+  async function boot() {
+    hydrateIcons();
+    showScreen('loading');
+    try {
+      const r = await api('me');
+      if (r.ok) { enter(r.data.user, r.data.state); return; }
+      if (r.status === 401) { clearCache(); renderAuth('signup'); return; }
+      throw new Error('server');
+    } catch (e) {
+      // Offline: reopen the last signed-in account from this device.
+      const session = readCache();
+      if (session && session.user) {
+        user = session.user;
+        state = Object.assign(defaultState(), cachedState(user) || {});
+        dirty = !!session.dirty;
+        applyTheme();
+        if (state.onboarded) startApp(); else renderOnboarding();
+        return;
+      }
+      renderAuth('signup', 'You appear to be offline. Connect to create an account or sign in.');
+    }
+  }
+  boot();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
