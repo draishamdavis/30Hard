@@ -553,6 +553,11 @@
           <button role="tab" data-mode="login" aria-pressed="${!signup}">Sign in</button>
         </div>
 
+        <div class="google-wrap" id="googleWrap" hidden>
+          <div id="googleBtn" class="google-btn"></div>
+          <div class="or"><span>or use email</span></div>
+        </div>
+
         <form class="auth-form" id="authForm" novalidate>
           ${signup ? `<label class="in"><span>Your name</span><input name="name" type="text" autocomplete="given-name" maxlength="60" required/></label>` : ''}
           <label class="in"><span>Email</span><input name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" required/></label>
@@ -576,8 +581,51 @@
       enter(r.data.user, r.data.state);
     });
     showScreen('auth');
+    setupGoogle();
     const first = $('#gate input');
     if (first && window.matchMedia('(hover: hover)').matches) first.focus();
+  }
+
+  /* Google sign-in (shown only when the server has a Google client id) */
+  let configPromise = null, gsiPromise = null;
+  function loadConfig() {
+    if (!configPromise) configPromise = api('config').then(r => (r.ok ? r.data : {})).catch(() => { configPromise = null; return {}; });
+    return configPromise;
+  }
+  function loadGsi() {
+    if (!gsiPromise) gsiPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://accounts.google.com/gsi/client';
+      s.async = true; s.onload = resolve; s.onerror = () => { gsiPromise = null; reject(); };
+      document.head.appendChild(s);
+    });
+    return gsiPromise;
+  }
+  async function setupGoogle() {
+    const cfg = await loadConfig();
+    if (!cfg.googleClientId) return;
+    try { await loadGsi(); } catch (e) { return; }
+    const wrap = $('#googleWrap'), btn = $('#googleBtn');
+    if (!wrap || !btn || !window.google) return;
+    const dark = document.documentElement.dataset.theme === 'dark' ||
+      (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+    google.accounts.id.initialize({
+      client_id: cfg.googleClientId,
+      ux_mode: 'popup',
+      callback: async ({ credential }) => {
+        const err = $('#authError');
+        let r;
+        try { r = await api('google', 'POST', { credential }); }
+        catch (e) { r = { ok: false, data: { error: 'You appear to be offline. Please try again.' } }; }
+        if (!r.ok) { if (err) err.textContent = r.data.error || 'Google sign-in did not work. Please try again.'; return; }
+        enter(r.data.user, r.data.state);
+      }
+    });
+    google.accounts.id.renderButton(btn, {
+      type: 'standard', theme: dark ? 'filled_black' : 'outline', size: 'large', shape: 'pill',
+      text: 'continue_with', logo_alignment: 'center', width: Math.min(400, btn.clientWidth || 340)
+    });
+    wrap.hidden = false;
   }
 
   function signedOut(message) {
@@ -733,6 +781,7 @@
         (async () => {
           await sync();
           await api('logout', 'POST', {}).catch(() => null);
+          if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
           signedOut();
         })();
         return;

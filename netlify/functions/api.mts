@@ -10,7 +10,10 @@ function store(name: string) {
 
 export default async (req: Request) => {
   const stores = { users: store('users'), state: store('state'), attempts: store('attempts') } as unknown as Stores;
-  return createApi(stores, Netlify.env.get('SESSION_SECRET'))(req);
+  return createApi(stores, {
+    secret: Netlify.env.get('SESSION_SECRET'),
+    googleClientId: Netlify.env.get('GOOGLE_CLIENT_ID'),
+  })(req);
 };
 
 export const config: Config = {

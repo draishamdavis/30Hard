@@ -39,7 +39,8 @@ npm test
 ## Deploy (Netlify)
 
 1. Link this repository to a Netlify project. `netlify.toml` already sets the publish folder and functions.
-2. Add an environment variable named `SESSION_SECRET` (a long random string) scoped to Functions.
+2. Optional: add `SESSION_SECRET` (a long random string) scoped to Functions. Without it, the app generates one and stores it in Netlify Blobs.
+3. Optional, for **Continue with Google**: create an OAuth client ID (type "Web application") in Google Cloud Console, add your site address under "Authorized JavaScript origins," and save the client ID as `GOOGLE_CLIENT_ID` scoped to Functions. The Google button appears automatically once it is set.
 
 Accounts and progress live in Netlify Blobs. Passwords are hashed with scrypt, sessions use signed HttpOnly cookies, and repeated failed sign-ins lock the account for 15 minutes.
 

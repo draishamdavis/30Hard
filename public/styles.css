@@ -504,3 +504,10 @@ body[data-screen="loading"] .splash {
 }
 .switch[aria-checked="true"] { background: var(--accent); }
 .switch[aria-checked="true"] span { transform: translateX(20px); }
+
+/* Google sign-in */
+.google-wrap { margin-bottom: var(--s2); }
+.google-wrap[hidden] { display: none; }
+.google-btn { display: flex; justify-content: center; min-height: 44px; }
+.or { display: flex; align-items: center; gap: 12px; margin: var(--s6) 0 var(--s4); font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }

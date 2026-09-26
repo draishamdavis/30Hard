@@ -7,7 +7,7 @@ import { createApi, memoryStores } from './netlify/lib/core.mts';
 
 const PORT = process.env.PORT || 8080;
 const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-const api = createApi(memoryStores(), process.env.SESSION_SECRET || 'local-dev-secret');
+const api = createApi(memoryStores(), { secret: process.env.SESSION_SECRET, googleClientId: process.env.GOOGLE_CLIENT_ID });
 
 const MIME = {
   '.html': 'text/html',

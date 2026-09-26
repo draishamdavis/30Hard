@@ -1,6 +1,6 @@
 /* 30 HARD account API: sign up, sign in, sign out, profile, and per-user app state.
    Storage is injected so the same logic runs on Netlify Blobs and in local development. */
-import { randomBytes, randomUUID, scrypt, timingSafeEqual, createHmac } from 'node:crypto';
+import { randomBytes, randomUUID, scrypt, timingSafeEqual, createHmac, createPublicKey, verify as verifySig } from 'node:crypto';
 
 export interface KV {
   get(key: string, opts: { type: 'json' }): Promise<any | null>;
@@ -69,12 +69,64 @@ const userKey = (email: string) => `user:${email}`;
 const idKey = (id: string) => `id:${id}`;
 const publicUser = (u: any) => ({ id: u.id, email: u.email, name: u.name, createdAt: u.createdAt });
 
+/* ─────────────── Google sign-in ─────────────── */
+
+const GOOGLE_ISSUERS = ['accounts.google.com', 'https://accounts.google.com'];
+const GOOGLE_CERTS = 'https://www.googleapis.com/oauth2/v3/certs';
+export type JwksFetcher = () => Promise<{ keys: any[] }>;
+let jwksCache: { at: number; keys: any[] } | null = null;
+async function defaultJwks() {
+  if (jwksCache && Date.now() - jwksCache.at < 3600000) return { keys: jwksCache.keys };
+  const res = await fetch(GOOGLE_CERTS);
+  if (!res.ok) throw new Error('certs');
+  const data = await res.json();
+  jwksCache = { at: Date.now(), keys: data.keys };
+  return data;
+}
+
+/* Verifies a Google ID token (RS256) and returns its claims, or null. */
+export async function verifyGoogleToken(idToken: string, clientId: string, jwks: JwksFetcher): Promise<any | null> {
+  const parts = String(idToken || '').split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+    if (header.alg !== 'RS256') return null;
+    const jwk = (await jwks()).keys.find(k => k.kid === header.kid);
+    if (!jwk) return null;
+    const ok = verifySig('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`),
+      createPublicKey({ key: jwk, format: 'jwk' }), Buffer.from(parts[2], 'base64url'));
+    if (!ok) return null;
+    if (!GOOGLE_ISSUERS.includes(claims.iss) || claims.aud !== clientId) return null;
+    if (typeof claims.exp !== 'number' || claims.exp * 1000 < Date.now()) return null;
+    if (!claims.email || claims.email_verified !== true) return null;
+    return claims;
+  } catch { return null; }
+}
+
 /* ─────────────── Handler ─────────────── */
 
-export function createApi(stores: Stores, secret: string | undefined) {
+export interface ApiOptions { secret?: string; googleClientId?: string; jwks?: JwksFetcher; }
+
+export function createApi(stores: Stores, opts: ApiOptions = {}) {
+  const googleClientId = opts.googleClientId || '';
+  const jwks = opts.jwks || defaultJwks;
+  let secret = opts.secret || '';
+
+  // Without a configured SESSION_SECRET, generate one once and keep it in storage.
+  async function ensureSecret(): Promise<string> {
+    if (secret) return secret;
+    const saved = await stores.users.get('config:session-secret', { type: 'json' });
+    if (saved) return (secret = saved);
+    const fresh = randomBytes(48).toString('base64url');
+    await stores.users.setJSON('config:session-secret', fresh);
+    const confirmed = await stores.users.get('config:session-secret', { type: 'json' });
+    return (secret = confirmed || fresh);
+  }
+
   async function currentUser(req: Request): Promise<any | null> {
     const token = readCookie(req, COOKIE);
-    if (!token || !secret) return null;
+    if (!token) return null;
     const session = verify(token, secret);
     if (!session) return null;
     const email = await stores.users.get(idKey(session.uid), { type: 'json' });
@@ -84,12 +136,12 @@ export function createApi(stores: Stores, secret: string | undefined) {
   }
 
   function startSession(user: any, secure: boolean): string {
-    const token = sign({ uid: user.id, sv: user.sv, exp: Date.now() + SESSION_DAYS * 86400000 }, secret!);
+    const token = sign({ uid: user.id, sv: user.sv, exp: Date.now() + SESSION_DAYS * 86400000 }, secret);
     return sessionCookie(token, secure, SESSION_DAYS * 86400);
   }
 
   return async function handle(req: Request): Promise<Response> {
-    if (!secret) return fail(500, 'Server is missing SESSION_SECRET.');
+    await ensureSecret();
     const url = new URL(req.url);
     const route = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
     const secure = url.protocol === 'https:';
@@ -114,6 +166,35 @@ export function createApi(stores: Stores, secret: string | undefined) {
       return json(201, { user: publicUser(user), state: null }, { 'Set-Cookie': startSession(user, secure) });
     }
 
+    if (route === 'config' && method === 'GET') {
+      return json(200, { googleClientId: googleClientId || null });
+    }
+
+    if (route === 'google' && method === 'POST') {
+      if (!googleClientId) return fail(503, 'Google sign-in is not set up yet.');
+      const b = await body(req);
+      let claims: any = null;
+      try { claims = await verifyGoogleToken(b?.credential, googleClientId, jwks); } catch { claims = null; }
+      if (!claims) return fail(401, 'Google sign-in could not be verified. Please try again.');
+      const email = String(claims.email).toLowerCase();
+      let user = await stores.users.get(userKey(email), { type: 'json' });
+      let created = false;
+      if (!user) {
+        const name = String(claims.given_name || claims.name || email.split('@')[0]).slice(0, 60);
+        user = { id: randomUUID(), email, name, google: claims.sub, sv: 1, createdAt: new Date().toISOString() };
+        await stores.users.setJSON(userKey(email), user);
+        await stores.users.setJSON(idKey(user.id), email);
+        created = true;
+      } else if (user.google && user.google !== claims.sub) {
+        return fail(409, 'That email is linked to a different Google account.');
+      } else if (!user.google) {
+        user.google = claims.sub;
+        await stores.users.setJSON(userKey(email), user);
+      }
+      const state = created ? null : await stores.state.get(user.id, { type: 'json' });
+      return json(created ? 201 : 200, { user: publicUser(user), state }, { 'Set-Cookie': startSession(user, secure) });
+    }
+
     if (route === 'login' && method === 'POST') {
       const b = await body(req);
       const email = String(b?.email || '').trim().toLowerCase();
@@ -125,8 +206,9 @@ export function createApi(stores: Stores, secret: string | undefined) {
       if (lock && lock.until > Date.now()) return fail(429, 'Too many attempts. Please wait 15 minutes and try again.');
 
       const user = await stores.users.get(userKey(email), { type: 'json' });
-      const hash = await hashPassword(password, user ? Buffer.from(user.salt, 'base64url') : randomBytes(16));
-      const ok = !!user && timingSafeEqual(hash, Buffer.from(user.hash, 'base64url'));
+      const hash = await hashPassword(password, user && user.salt ? Buffer.from(user.salt, 'base64url') : randomBytes(16));
+      const ok = !!user && !!user.hash && timingSafeEqual(hash, Buffer.from(user.hash, 'base64url'));
+      if (user && !user.hash && user.google) return fail(401, 'This account uses Google. Tap Continue with Google.');
       if (!ok) {
         const expired = lock && lock.until && lock.until <= Date.now();
         const fails = (expired ? 0 : lock?.fails || 0) + 1;
