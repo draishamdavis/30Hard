@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#F5F2EC"/>
+  <circle cx="256" cy="256" r="168" fill="none" stroke="#E4DFD5" stroke-width="14"/>
+  <circle cx="256" cy="256" r="168" fill="none" stroke="#6B7A5E" stroke-width="14" stroke-linecap="round"
+    stroke-dasharray="1055.6" stroke-dashoffset="264" transform="rotate(-90 256 256)"/>
+  <text x="256" y="262" text-anchor="middle" font-family="Manrope, -apple-system, Helvetica, Arial, sans-serif" font-size="128" font-weight="800" letter-spacing="-5" fill="#1E1D1B">30</text>
+  <text x="258" y="318" text-anchor="middle" font-family="Manrope, -apple-system, Helvetica, Arial, sans-serif" font-size="34" font-weight="600" letter-spacing="10" fill="#6D6961">HARD</text>
+</svg>

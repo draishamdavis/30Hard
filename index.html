@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>30 HARD</title>
+<meta name="description" content="A 30-day practice of discipline, wellness, and spiritual formation."/>
+<meta name="theme-color" content="#F5F2EC" media="(prefers-color-scheme: light)"/>
+<meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="30 HARD"/>
+<link rel="manifest" href="manifest.webmanifest"/>
+<link rel="icon" type="image/svg+xml" href="icon.svg"/>
+<link rel="apple-touch-icon" href="icon-180.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <button class="wordmark" data-nav="today" aria-label="30 HARD, go to Today">30<span>HARD</span></button>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings"><i data-icon="settings"></i></button>
+  </header>
+
+  <main class="views">
+    <section class="view" id="view-today" aria-label="Today"></section>
+    <section class="view" id="view-devotional" aria-label="Devotional"></section>
+    <section class="view" id="view-progress" aria-label="Progress"></section>
+    <section class="view" id="view-why" aria-label="My Why"></section>
+  </main>
+
+  <nav class="tabbar" aria-label="Primary">
+    <button class="tab" data-nav="today"><i data-icon="circleCheck"></i><span>Today</span></button>
+    <button class="tab" data-nav="devotional"><i data-icon="bookOpen"></i><span>Devotional</span></button>
+    <button class="tab" data-nav="progress"><i data-icon="chart"></i><span>Progress</span></button>
+    <button class="tab" data-nav="why"><i data-icon="compass"></i><span>My Why</span></button>
+  </nav>
+
+  <div class="sheet-backdrop" id="sheetBackdrop"></div>
+  <aside class="sheet" id="settingsSheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"></aside>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+
+<script src="icons.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
